@@ -60,14 +60,6 @@ def sample_batch(table, batch_size):
     }
 
 
-def load_weigths_into_target_network(agent, target_network):
-    """ assign target_network.weights variables to their respective agent.weights values. """
-    assigns = []
-    for w_agent, w_target in zip(agent.weights, target_network.weights):
-        assigns.append(tf.assign(w_target, w_agent, validate_shape=True))
-    tf.get_default_session().run(assigns)
-
-
 state_dim = (5122,)
 n_actions = 5
 
@@ -77,54 +69,55 @@ rewards_ph = tf.placeholder(tf.float32, shape=[None])
 next_obs_ph = tf.placeholder(tf.float32, shape=(None,) + state_dim)
 is_done_ph = tf.placeholder(tf.float32, shape=[None])
 is_not_done = 1 - is_done_ph
+gamma = 0.99
 
 
-agent = DQNAgent("dqn_agent", state_dim, epsilon=0.5, weights_file='./single_turtle_network.hdf5')
-target_network = DQNAgent("target_network", state_dim, weights_file='./single_turtle_target_network.hdf5')
+class TrainAgent():
+    def __init__(self):
+        self.agent = DQNAgent("dqn_agent", state_dim, epsilon=0.5, weights_file='./single_turtle_network.hdf5')
+        self.target_network = DQNAgent("target_network", state_dim, weights_file='./single_turtle_target_network.hdf5')
 
-sess.run(tf.global_variables_initializer())
+        current_qvalues = self.agent.get_symbolic_qvalues(obs_ph)
+        current_action_qvalues = tf.reduce_sum(tf.one_hot(actions_ph, n_actions) * current_qvalues, axis=1)
 
-counter = 0
+        # compute q-values for NEXT states with target network
+        next_qvalues_target = self.target_network.get_symbolic_qvalues(next_obs_ph)
+
+        # compute state values by taking max over next_qvalues_target for all actions
+        next_state_values_target = tf.reduce_max(next_qvalues_target, axis=-1)
+
+        # compute Q_reference(s,a) as per formula above.
+        reference_qvalues = rewards_ph + gamma * next_state_values_target * is_not_done
+
+        # Define loss function for sgd.
+        td_loss = (current_action_qvalues - reference_qvalues) ** 2
+        self.td_loss = tf.reduce_mean(td_loss)
+
+        self.train_step = tf.train.AdamOptimizer(1e-3).minimize(td_loss, var_list=self.agent.weights)
+
+        sess.run(tf.global_variables_initializer())
+        self.counter = 0
 
 
-def train():
-    global counter
-    fileh = open_file('C:/temp/er_store.h5', mode='r')
-    table = fileh.get_node('/experience_store/er_store')
+    def train(self):
+        fileh = open_file('C:/temp/er_store.h5', mode='a')
+        table = fileh.get_node('/experience_store/er_store')
 
-    gamma = 0.99
+        for i in range(10):
+            _, loss_t = sess.run([self.train_step, self.td_loss], sample_batch(table, batch_size=64))
+        #print("Trained network, ER entries: {}".format(table.nrows))
 
-    current_qvalues = agent.get_symbolic_qvalues(obs_ph)
-    current_action_qvalues = tf.reduce_sum(tf.one_hot(actions_ph, n_actions) * current_qvalues, axis=1)
+        if self.counter % 10 == 0:
+            print(self.counter)
+        if self.counter % 25 == 0:
+            print("Updating target network, counter {}".format(self.counter))
+            self.agent.network.save_weights('./single_turtle_network.hdf5')
+            self.agent.network.save_weights('./single_turtle_target_network.hdf5')
+            self.target_network = DQNAgent("target_network", state_dim, weights_file='./single_turtle_target_network.hdf5')
 
-    # compute q-values for NEXT states with target network
-    next_qvalues_target = target_network.get_symbolic_qvalues(next_obs_ph)
+        if table.nrows > 100000:
+            table.remove_rows(0, 25000)
+            table.flush()
 
-    # compute state values by taking max over next_qvalues_target for all actions
-    next_state_values_target = tf.reduce_max(next_qvalues_target, axis=-1)
-
-    # compute Q_reference(s,a) as per formula above.
-    reference_qvalues = rewards_ph + gamma * next_state_values_target * is_not_done
-
-    # Define loss function for sgd.
-    td_loss = (current_action_qvalues - reference_qvalues) ** 2
-    td_loss = tf.reduce_mean(td_loss)
-
-    train_step = tf.train.AdamOptimizer(1e-3).minimize(td_loss, var_list=agent.weights)
-
-    sess.run(tf.global_variables_initializer())
-
-    for i in range(7):
-        _, loss_t = sess.run([train_step, td_loss], sample_batch(table, batch_size=64))
-    print("Trained network, ER entries: {}".format(table.nrows))
-
-    if counter % 50 == 0:
-        print("Updating target network, counter {}".format(counter))
-        load_weigths_into_target_network(agent, target_network)
-
-    if table.nrows > 100000:
-        table.remove_rows(0, 25000)
-        table.flush()
-
-    counter += 1
-    fileh.close()
+        self.counter += 1
+        fileh.close()
